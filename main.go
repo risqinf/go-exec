@@ -18,7 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -59,12 +58,13 @@ var levelNames = map[logLevel]string{
 	levelFatal: "FATAL",
 }
 
+// Logger is a structured, leveled, dual-output logger with log rotation.
 type Logger struct {
-	mu       sync.Mutex
-	level    logLevel
-	format   string // "json" | "text"
-	writers  []io.Writer
-	fields   map[string]string // static fields appended to every entry
+	mu      sync.Mutex
+	level   logLevel
+	format  string // "json" | "text"
+	writers []io.Writer
+	fields  map[string]string
 }
 
 type loggerConfig struct {
@@ -78,7 +78,6 @@ type loggerConfig struct {
 }
 
 func newLogger(cfg loggerConfig) (*Logger, error) {
-	// ── parse level ───────────────────────────────────────────────────────────
 	lvlMap := map[string]logLevel{
 		"debug": levelDebug,
 		"info":  levelInfo,
@@ -90,13 +89,11 @@ func newLogger(cfg loggerConfig) (*Logger, error) {
 		return nil, fmt.Errorf("invalid log level %q", cfg.Level)
 	}
 
-	// ── rotating file writer ──────────────────────────────────────────────────
 	rw, err := newRotatingWriter(cfg.FilePath, cfg.MaxSizeMB, cfg.MaxBackups)
 	if err != nil {
 		return nil, fmt.Errorf("open log file %q: %w", cfg.FilePath, err)
 	}
 
-	// ── static fields ─────────────────────────────────────────────────────────
 	hostname, _ := os.Hostname()
 	fields := map[string]string{
 		"service":  cfg.Service,
@@ -147,15 +144,12 @@ func (l *Logger) formatJSON(ts string, lv logLevel, msg string, extra map[string
 	b.WriteString(strings.ToLower(levelNames[lv]))
 	b.WriteString(`","message":`)
 	b.WriteString(jsonQuote(msg))
-
-	// static fields
 	for k, v := range l.fields {
 		b.WriteString(`,"`)
 		b.WriteString(k)
 		b.WriteString(`":`)
 		b.WriteString(jsonQuote(v))
 	}
-	// dynamic fields
 	for k, v := range extra {
 		b.WriteString(`,"`)
 		b.WriteString(k)
@@ -198,8 +192,7 @@ func (l *Logger) With(kv ...any) *Logger {
 	for k, v := range l.fields {
 		child.fields[k] = v
 	}
-	extra := kvToMap(kv)
-	for k, v := range extra {
+	for k, v := range kvToMap(kv) {
 		child.fields[k] = fmt.Sprintf("%v", v)
 	}
 	return child
@@ -252,11 +245,9 @@ func (rw *rotatingWriter) openOrCreate() error {
 func (rw *rotatingWriter) Write(p []byte) (int, error) {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
-
 	if rw.size+int64(len(p)) > rw.maxBytes {
 		_ = rw.rotate()
 	}
-
 	n, err := rw.file.Write(p)
 	rw.size += int64(n)
 	return n, err
@@ -264,15 +255,13 @@ func (rw *rotatingWriter) Write(p []byte) (int, error) {
 
 func (rw *rotatingWriter) rotate() error {
 	_ = rw.file.Close()
-
-	// Shift backups: .7 deleted, .6→.7, …, .1→.2
 	for i := rw.maxBackups - 1; i >= 1; i-- {
-		old := fmt.Sprintf("%s.%d", rw.path, i)
-		newer := fmt.Sprintf("%s.%d", rw.path, i+1)
-		_ = os.Rename(old, newer)
+		_ = os.Rename(
+			fmt.Sprintf("%s.%d", rw.path, i),
+			fmt.Sprintf("%s.%d", rw.path, i+1),
+		)
 	}
 	_ = os.Rename(rw.path, rw.path+".1")
-
 	return rw.openOrCreate()
 }
 
@@ -289,7 +278,7 @@ var defaultSearchPaths = []string{
 	"/bin",
 }
 
-// Job is a single scheduled task.
+// Job is a single scheduled task parsed from config.
 type Job struct {
 	Raw     string
 	Minute  string
@@ -380,7 +369,7 @@ func parseLine(line string) (Job, error) {
 
 const defaultJobTimeout = 5 * time.Minute
 
-// Result holds the outcome of one job run.
+// Result holds the outcome of one job execution.
 type Result struct {
 	Job        Job
 	StartedAt  time.Time
@@ -394,6 +383,7 @@ type Result struct {
 
 func (r Result) Success() bool { return r.Error == nil && r.ExitCode == 0 }
 
+// Executor runs OS commands with PATH resolution and per-job timeout.
 type Executor struct {
 	searchPaths []string
 	timeout     time.Duration
@@ -426,7 +416,10 @@ func (e *Executor) Run(parentCtx context.Context, job Job) Result {
 	cmd := exec.CommandContext(ctx, cmdPath, job.Args...)
 	cmd.Env = e.buildEnv()
 
-	if err := e.setCredentials(cmd, job.User); err != nil {
+	// setCredentials is implemented per-platform:
+	//   platform_unix.go    → switches UID/GID via syscall.Credential
+	//   platform_windows.go → no-op (user switching unsupported)
+	if err := setCredentials(cmd, job.User); err != nil {
 		res.Error = fmt.Errorf("credentials user=%q: %w", job.User, err)
 		res.FinishedAt = time.Now()
 		res.Duration = res.FinishedAt.Sub(res.StartedAt)
@@ -439,9 +432,9 @@ func (e *Executor) Run(parentCtx context.Context, job Job) Result {
 
 	runErr := cmd.Run()
 	res.FinishedAt = time.Now()
-	res.Duration   = res.FinishedAt.Sub(res.StartedAt)
-	res.Stdout     = strings.TrimSpace(stdout.String())
-	res.Stderr     = strings.TrimSpace(stderr.String())
+	res.Duration = res.FinishedAt.Sub(res.StartedAt)
+	res.Stdout = strings.TrimSpace(stdout.String())
+	res.Stderr = strings.TrimSpace(stderr.String())
 
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
@@ -478,25 +471,6 @@ func (e *Executor) resolvePath(cmd string) (string, error) {
 		cmd, strings.Join(e.searchPaths, ":"))
 }
 
-func (e *Executor) setCredentials(cmd *exec.Cmd, username string) error {
-	if username == "" || username == "root" {
-		return nil
-	}
-	u, err := user.Lookup(username)
-	if err != nil {
-		return fmt.Errorf("lookup %q: %w", username, err)
-	}
-	uid, _ := strconv.Atoi(u.Uid)
-	gid, _ := strconv.Atoi(u.Gid)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid: uint32(uid),
-			Gid: uint32(gid),
-		},
-	}
-	return nil
-}
-
 func (e *Executor) buildEnv() []string {
 	path := strings.Join(e.searchPaths, ":") + ":" + os.Getenv("PATH")
 	env := []string{
@@ -513,12 +487,31 @@ func (e *Executor) buildEnv() []string {
 	return env
 }
 
+// lookupUser resolves username to uid/gid.
+// Used by platform_unix.go only.
+func lookupUser(username string) (uid, gid uint32, err error) {
+	u, err := user.Lookup(username)
+	if err != nil {
+		return 0, 0, fmt.Errorf("lookup %q: %w", username, err)
+	}
+	uidInt, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid uid %q: %w", u.Uid, err)
+	}
+	gidInt, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid gid %q: %w", u.Gid, err)
+	}
+	return uint32(uidInt), uint32(gidInt), nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Scheduler
 // ─────────────────────────────────────────────────────────────────────────────
 
 const maxConcurrentJobs = 32
 
+// Scheduler drives the cron-style scheduling loop.
 type Scheduler struct {
 	log    *Logger
 	exec   *Executor
@@ -681,7 +674,6 @@ func matchField(field string, value int) bool {
 }
 
 func matchPart(part string, value int) bool {
-	// step: */5 or 1-30/5
 	if idx := strings.Index(part, "/"); idx != -1 {
 		step, err := strconv.Atoi(part[idx+1:])
 		if err != nil || step <= 0 {
@@ -694,11 +686,9 @@ func matchPart(part string, value int) bool {
 		start, end, ok := parseRange(base)
 		return ok && value >= start && value <= end && (value-start)%step == 0
 	}
-	// range: 1-5
 	if start, end, ok := parseRange(part); ok {
 		return value >= start && value <= end
 	}
-	// exact
 	n, err := strconv.Atoi(part)
 	return err == nil && n == value
 }
@@ -759,10 +749,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	// ── Logger ─────────────────────────────────────────────────────────────
-	hostname, _ := os.Hostname()
-	_ = hostname
-
+	// ── Logger ────────────────────────────────────────────────────────────────
 	log, err := newLogger(loggerConfig{
 		Level:      *logLevel,
 		Format:     *logFormat,
@@ -788,7 +775,7 @@ func main() {
 		"job_timeout", jobTimeout.String(),
 	)
 
-	// ── Config ─────────────────────────────────────────────────────────────
+	// ── Config ────────────────────────────────────────────────────────────────
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatal("failed to load config", "path", *configPath, "error", err)
@@ -798,24 +785,26 @@ func main() {
 		log.Debug("registered job", "index", i, "job", j.String())
 	}
 
-	// ── Scheduler ──────────────────────────────────────────────────────────
+	// ── Scheduler ─────────────────────────────────────────────────────────────
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	exec := newExecutor(defaultSearchPaths, *jobTimeout)
-	sched := newScheduler(log, exec)
+	ex := newExecutor(defaultSearchPaths, *jobTimeout)
+	sched := newScheduler(log, ex)
 	sched.Start(ctx, cfg)
 
-	// ── Signal handling ────────────────────────────────────────────────────
+	// ── Signal handling ───────────────────────────────────────────────────────
+	// notifySignals and isReload are implemented per-platform:
+	//   platform_unix.go    → SIGINT, SIGTERM, SIGHUP
+	//   platform_windows.go → os.Interrupt only (no SIGHUP)
 	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	notifySignals(quit)
 
 	for {
 		sig := <-quit
 		log.Info("signal received", "signal", sig.String())
 
-		switch sig {
-		case syscall.SIGHUP:
+		if isReload(sig) {
 			newCfg, err := loadConfig(*configPath)
 			if err != nil {
 				log.Error("config reload failed", "path", *configPath, "error", err)
@@ -823,13 +812,14 @@ func main() {
 			}
 			sched.Reload(newCfg)
 			log.Info("config reloaded", "path", *configPath, "jobs", len(newCfg.Jobs))
-
-		case syscall.SIGINT, syscall.SIGTERM:
-			log.Info("initiating graceful shutdown")
-			cancel()
-			sched.Stop()
-			log.Info("service stopped gracefully")
-			return
+			continue
 		}
+
+		// SIGINT or SIGTERM → graceful shutdown
+		log.Info("initiating graceful shutdown")
+		cancel()
+		sched.Stop()
+		log.Info("service stopped gracefully")
+		return
 	}
 }
