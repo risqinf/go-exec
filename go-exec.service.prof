@@ -1,0 +1,28 @@
+[Unit]
+Description=go-exec — Enterprise cron-style job scheduler
+Documentation=https://github.com/risqinf/go-exec
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/go-exec \
+    -config /etc/go-exec \
+    -log    /var/log/go-exec.log \
+    -level  info \
+    -format json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=go-exec
+PrivateTmp=true
+ProtectSystem=full
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
