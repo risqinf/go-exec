@@ -24,7 +24,7 @@ install: build
 	install -m 0755 $(BINARY) $(INSTALL)
 
 	@echo "[*] Installing systemd service $(SERVICE)"
-	install -m 0644 go-exec.service $(SERVICE)
+	install -m 0644 $(BINARY).service $(SERVICE)
 
 	@echo "[*] Creating config $(CONFIG)"
 	@if [ ! -f $(CONFIG) ]; then \
