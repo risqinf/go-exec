@@ -117,14 +117,14 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.22"
-          cache: true
+          cache: false
 
       - name: Set build metadata
         id: meta
         run: |
-          echo "VERSION=${GITHUB_REF_NAME}"       >> $GITHUB_OUTPUT
-          echo "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
-          echo "GIT_COMMIT=$(git rev-parse --short HEAD)"   >> $GITHUB_OUTPUT
+          echo "VERSION=${GITHUB_REF_NAME}"                          >> $GITHUB_OUTPUT
+          echo "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"          >> $GITHUB_OUTPUT
+          echo "GIT_COMMIT=$(git rev-parse --short HEAD)"            >> $GITHUB_OUTPUT
 
       - name: Build binary
         env:
@@ -145,7 +145,6 @@ jobs:
             -o "${BINARY_NAME}" \
             .
 
-          # Create checksum
           sha256sum "${BINARY_NAME}" > "${BINARY_NAME}.sha256"
 
       - name: Upload artifact
@@ -181,7 +180,6 @@ jobs:
           cat checksums.txt
 
       - name: Generate release notes
-        id: notes
         run: |
           TAG="${GITHUB_REF_NAME}"
           PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${TAG}$" | head -1)
@@ -238,9 +236,6 @@ jobs:
             echo "sha256sum -c checksums.txt"
             echo "\`\`\`"
           } > release_notes.md
-
-          cat release_notes.md
-          echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
