@@ -1,0 +1,16 @@
+# /etc/go-exec — go-exec configuration
+#
+# Format: minute  hour  day  month  weekday  user  command [args...]
+#
+# Field syntax:
+#   *        every value
+#   5        exact value
+#   1,3,5    list
+#   1-5      range
+#   */5      step
+#   1-30/5   range + step
+#
+# Reload without restart:  systemctl reload go-exec
+
+* * * * * root xp
+0 0,1,3,5,6,9,11,12,13,15,17,18,21,23 * * * root backup
