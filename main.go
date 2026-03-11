@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"os/user"
 	"path/filepath"
 	"strconv"
