@@ -1,0 +1,257 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          # ── Linux ──────────────────────────────────────────────────────────
+          - goos: linux
+            goarch: amd64
+            label: linux-amd64
+
+          - goos: linux
+            goarch: arm64
+            label: linux-arm64
+
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+            label: linux-armv7
+
+          - goos: linux
+            goarch: arm
+            goarm: "6"
+            label: linux-armv6
+
+          - goos: linux
+            goarch: "386"
+            label: linux-386
+
+          - goos: linux
+            goarch: mips
+            gomips: softfloat
+            label: linux-mips-softfloat
+
+          - goos: linux
+            goarch: mipsle
+            gomips: softfloat
+            label: linux-mipsle-softfloat
+
+          - goos: linux
+            goarch: mips64
+            label: linux-mips64
+
+          - goos: linux
+            goarch: mips64le
+            label: linux-mips64le
+
+          - goos: linux
+            goarch: riscv64
+            label: linux-riscv64
+
+          - goos: linux
+            goarch: s390x
+            label: linux-s390x
+
+          - goos: linux
+            goarch: ppc64le
+            label: linux-ppc64le
+
+          # ── macOS ──────────────────────────────────────────────────────────
+          - goos: darwin
+            goarch: amd64
+            label: darwin-amd64
+
+          - goos: darwin
+            goarch: arm64
+            label: darwin-arm64
+
+          # ── FreeBSD ────────────────────────────────────────────────────────
+          - goos: freebsd
+            goarch: amd64
+            label: freebsd-amd64
+
+          - goos: freebsd
+            goarch: arm64
+            label: freebsd-arm64
+
+          - goos: freebsd
+            goarch: "386"
+            label: freebsd-386
+
+          # ── Windows ────────────────────────────────────────────────────────
+          - goos: windows
+            goarch: amd64
+            label: windows-amd64
+            ext: ".exe"
+
+          - goos: windows
+            goarch: arm64
+            label: windows-arm64
+            ext: ".exe"
+
+          - goos: windows
+            goarch: "386"
+            label: windows-386
+            ext: ".exe"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Set build metadata
+        id: meta
+        run: |
+          echo "VERSION=${GITHUB_REF_NAME}"       >> $GITHUB_OUTPUT
+          echo "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          echo "GIT_COMMIT=$(git rev-parse --short HEAD)"   >> $GITHUB_OUTPUT
+
+      - name: Build binary
+        env:
+          GOOS:        ${{ matrix.goos }}
+          GOARCH:      ${{ matrix.goarch }}
+          GOARM:       ${{ matrix.goarm }}
+          GOMIPS:      ${{ matrix.gomips }}
+          CGO_ENABLED: "0"
+        run: |
+          BINARY_NAME="go-exec-${{ matrix.label }}${{ matrix.ext }}"
+
+          go build \
+            -trimpath \
+            -ldflags "-s -w \
+              -X main.Version=${{ steps.meta.outputs.VERSION }} \
+              -X main.BuildTime=${{ steps.meta.outputs.BUILD_TIME }} \
+              -X main.GitCommit=${{ steps.meta.outputs.GIT_COMMIT }}" \
+            -o "${BINARY_NAME}" \
+            .
+
+          # Create checksum
+          sha256sum "${BINARY_NAME}" > "${BINARY_NAME}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-exec-${{ matrix.label }}
+          path: |
+            go-exec-${{ matrix.label }}${{ matrix.ext }}
+            go-exec-${{ matrix.label }}${{ matrix.ext }}.sha256
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Generate combined checksums
+        run: |
+          cd dist
+          sha256sum go-exec-* | grep -v '\.sha256' > checksums.txt
+          cat checksums.txt
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${TAG}$" | head -1)
+
+          {
+            echo "## go-exec ${TAG}"
+            echo ""
+            echo "### What's Changed"
+            if [ -n "${PREV_TAG}" ]; then
+              git log "${PREV_TAG}..HEAD" \
+                --pretty=format:"- %s ([%h](https://github.com/risqinf/go-exec/commit/%H))" \
+                --no-merges
+            else
+              git log \
+                --pretty=format:"- %s ([%h](https://github.com/risqinf/go-exec/commit/%H))" \
+                --no-merges | head -20
+            fi
+            echo ""
+            echo ""
+            echo "### Supported Platforms"
+            echo ""
+            echo "| Platform | Architecture | File |"
+            echo "|----------|-------------|------|"
+            echo "| Linux    | amd64       | \`go-exec-linux-amd64\` |"
+            echo "| Linux    | arm64       | \`go-exec-linux-arm64\` |"
+            echo "| Linux    | armv7       | \`go-exec-linux-armv7\` |"
+            echo "| Linux    | armv6       | \`go-exec-linux-armv6\` |"
+            echo "| Linux    | 386         | \`go-exec-linux-386\` |"
+            echo "| Linux    | mips        | \`go-exec-linux-mips-softfloat\` |"
+            echo "| Linux    | mipsle      | \`go-exec-linux-mipsle-softfloat\` |"
+            echo "| Linux    | mips64      | \`go-exec-linux-mips64\` |"
+            echo "| Linux    | mips64le    | \`go-exec-linux-mips64le\` |"
+            echo "| Linux    | riscv64     | \`go-exec-linux-riscv64\` |"
+            echo "| Linux    | s390x       | \`go-exec-linux-s390x\` |"
+            echo "| Linux    | ppc64le     | \`go-exec-linux-ppc64le\` |"
+            echo "| macOS    | amd64       | \`go-exec-darwin-amd64\` |"
+            echo "| macOS    | arm64 (M1+) | \`go-exec-darwin-arm64\` |"
+            echo "| FreeBSD  | amd64       | \`go-exec-freebsd-amd64\` |"
+            echo "| FreeBSD  | arm64       | \`go-exec-freebsd-arm64\` |"
+            echo "| FreeBSD  | 386         | \`go-exec-freebsd-386\` |"
+            echo "| Windows  | amd64       | \`go-exec-windows-amd64.exe\` |"
+            echo "| Windows  | arm64       | \`go-exec-windows-arm64.exe\` |"
+            echo "| Windows  | 386         | \`go-exec-windows-386.exe\` |"
+            echo ""
+            echo "### Install (Linux amd64)"
+            echo "\`\`\`bash"
+            echo "curl -fsSL https://github.com/risqinf/go-exec/releases/download/${TAG}/go-exec-linux-amd64 \\"
+            echo "  -o /usr/local/bin/go-exec"
+            echo "chmod +x /usr/local/bin/go-exec"
+            echo "\`\`\`"
+            echo ""
+            echo "### Verify checksum"
+            echo "\`\`\`bash"
+            echo "sha256sum -c checksums.txt"
+            echo "\`\`\`"
+          } > release_notes.md
+
+          cat release_notes.md
+          echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ github.ref_name }}
+          name:       ${{ github.ref_name }}
+          body_path:  release_notes.md
+          draft:      false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          files: |
+            dist/go-exec-*
+            dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
